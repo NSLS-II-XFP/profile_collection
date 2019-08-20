@@ -479,8 +479,8 @@ class XFPSampleSelector:
         controls_layout.addWidget(self.re_controls.widget)
 
         # Checkbox to enable/disable the protective shutter per each slot or per whole run
-        self.checkbox_shutter = QtWidgets.QCheckBox('Preshutter per slot?')
-        self.checkbox_shutter.setChecked(True)
+        self.checkbox_shutter = QtWidgets.QCheckBox('Preshutter per sample?')
+        self.checkbox_shutter.setChecked(False)
         self.checkbox_shutter.setCheckable(True)
         controls_layout.addWidget(self.checkbox_shutter)
 
@@ -629,6 +629,56 @@ class XFPSampleSelector:
                                     **d.md})
         return return_list
 
+    def walk_rows(self, snake=True):
+        """
+
+        returns
+        -------
+        [((row_num, x_start, x_stop, y, filter, exposure), [sample1, sample2, ...]),
+         ...
+         ]
+        """
+        rows = self._rows
+        cols = self._cols
+        # A 1d-array with bools (0/1) showing if the slot is enabled:
+        self.enabled = np.zeros((rows*cols), dtype=int)
+        for i in range(rows*cols):
+            d = self.slots[i]
+            if d.enabled:
+                self.enabled[i] = 1
+
+        # Convert it to 2d-array:
+        self.enabled = self.enabled.reshape((rows, cols))
+
+        # We start from the first X position -10 mm to reach the desired speed,
+        # and finish 10 mm after the last position in the row of 8 slots.
+        x_start, x_stop = HT_COORDS['x'][0] - 10.0, HT_COORDS['x'][self._cols-1] + 10.0
+        return_list = []
+        for i, row in enumerate(self.enabled):
+            if not np.sum(row):
+                continue
+            samples = []
+            for j in np.where(row)[0]:
+                 d = self.slots[cols*i + j]
+                 if not d.enabled:
+                      continue
+                 samples.append({'exposure': d.exposure,
+                                 'position': d.position,
+                                 'filter_index': d.filter['index'],
+                                 'filter_text': d.filter['text'],
+                                 **d.md})
+
+            if not samples:
+                raise RuntimeError('you found a bug?')
+            filt = samples[0]['filter_index']
+            exposure = samples[0]['exposure']
+            return_list.append(
+                ((i, x_start, x_stop, HT_COORDS['y'][i * self._cols], filt, exposure), samples))
+            if snake:
+                x_start, x_stop = x_stop, x_start
+
+        return return_list
+
     def show(self):
         return self.window.show()
 
@@ -767,6 +817,86 @@ class XFPSampleSelector:
         return (yield from bpp.finalize_wrapper(main_plan(file_name),
                                                 close_shutters()))
 
+    def fly_plan(self, file_name=None):
+
+        def close_shutters():
+            yield from bps.mv(pre_shutter, 'Close')
+            yield from bps.mv(pps_shutter, 'Close')
+            yield from bps.mv(ht.x, self.load_pos_x, ht.y, self.load_pos_y)  # load position
+
+        def main_plan(file_name):
+            # Reset colors to the COLOR_SELECTED before each run:
+            self.reset_colors()
+
+            reason = self.path_select.short_desc.displayText()
+            run_notes = self.path_select.notes.toPlainText()
+            if file_name is None:
+                gui_path = self.path_select.path
+                if gui_path and reason:
+                    fname = '_'.join(reason.split()) + '.csv'
+                    file_name = os.path.join(gui_path, fname)
+            xfp_print(f'CSV file name: {file_name}')
+
+            uid_list = []
+            base_md = {'plan_name': 'ht_fly'}
+            if reason:
+                base_md['reason'] = reason
+
+            if not mode.test_mode:
+                yield from bps.mv(pps_shutter, 'Open')
+
+            for (row_num, x_start, x_stop, y_height, filt, exposure), samples in self.walk_rows():
+                for j in range(self._cols):
+                    w = self.slots[row_num * self._cols + j]
+                    if w.enabled:
+                        w.change_color(COLOR_RUNNING)
+
+                # Open it once, when the holder arrives to the first scanning point:
+                if pre_shutter.status.get() == 'Not Open' and not self.checkbox_shutter.isChecked():
+                    yield from bps.mv(pre_shutter, 'Open')
+
+                # Check that the shutters are opened before collecting data:
+                if not mode.test_mode:
+                    if pps_shutter.status.get() == 'Not Open':
+                        raise Exception(f'{pps_shutter.name} must be open to finish the scan')
+                    if pre_shutter.status.get() == 'Not Open' and not self.checkbox_shutter.isChecked() :
+                        raise Exception(f'{pre_shutter.name} must be open to finish the scan')
+                velo = 5  # TODO make this a function of exposure and filter
+                # def fly_row(x_motor, y_motor, start_pos, end_pos, row_height, target_speed, samples):
+                # TODO: compute the velocity
+                uids = yield from fly_row(ht.x, ht.y, filter_wheel, x_start, x_stop, y_height, velo, filt,
+                                          [{**base_md, **s} for s in samples])
+
+                for j in range(self._cols):
+                    w = self.slots[row_num * self._cols + j]
+                    if w.enabled:
+                        w.change_color(COLOR_SUCCESS)
+
+                if uids is not None:
+                    uid_list.extend(uids)
+
+                yield from bps.checkpoint()
+
+            if uid_list:
+                columns = ('uid', 'name', 'exposure', 'filter_text', 'notes')
+                tbl = pd.DataFrame([[h.start[c] for c in columns]
+                                    for h in db[uid_list]], columns=columns)
+                self.last_table = tbl
+                if file_name is not None:
+                    tbl.to_csv(file_name, index=False)
+
+            # Close it once the walkthrough is done:
+            if not self.checkbox_shutter.isChecked():
+                yield from bps.mv(shutter, 'Close')
+
+            from bluesky.utils import FailedStatus
+            try:
+                yield from bps.mv(pps_shutter, 'Close')
+            except FailedStatus:
+                yield from bps.mv(pps_shutter, 'Close')
+
+        return (yield from bpp.finalize_wrapper(main_plan(file_name),
+                                                close_shutters()))
 
 def motors_positions(motors):
     format_str = []
@@ -798,6 +928,27 @@ def xfp_plan_fast_shutter(d, shutter_per_slot):
         yield from bps.mv(pre_shutter, 'Close')
 
     return (yield from bp.count([ht.x, ht.y], md=d))
+
+
+def fly_row(x_motor, y_motor, filt_motor, start_pos, end_pos, row_height, target_speed, filt_pos, samples):
+    # yield from bps.mov(x_motor.velocity, x_motor.velocity.limits[1])
+    move_to_thickness = float(get_position_from_index(filter_wheel.wheel_positions,
+                                                      'thickness',
+                                                      filt_pos))
+    yield from bps.mov(x_motor, start_pos,
+                       y_motor, row_height,
+                       filt_motor, move_to_thickness)
+
+    yield from bps.mov(x_motor.velocity, target_speed)
+
+    yield from bps.mov(x_motor, end_pos)
+
+    uids = []
+    for sample in samples:
+        uid = yield from bp.count([], md={'speed': target_speed, **sample})
+        uids.append(uid)
+
+    return uids
 
 try:
     HTgui.close()

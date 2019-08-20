@@ -2,11 +2,11 @@ from bluesky.callbacks.mpl_plotting import plot_peak_stats
 from bluesky.callbacks.fitting import PeakStats
 
 
-HT_X_START = 8.64
+HT_X_START = 8.70
 HT_Y_START = -85.96
 HT_COORDS_FILE = str(PROFILE_STARTUP_PATH / 'ht_coords.csv')
 HT_COORDS_FILE_OLD = str(PROFILE_STARTUP_PATH / 'ht_coords_old.csv')
-LOAD_POS_X = -90
+LOAD_POS_X = -50
 LOAD_POS_Y = -50
 
 #TODO: add qem2 once it's repared
@@ -32,7 +32,7 @@ class TestMode:
 mode = TestMode(test_mode=False)
 
 
-def align_ht(x_start=HT_X_START, y_start=HT_Y_START, md=None, offset=3, run=True,
+def align_ht(x_start=HT_X_START, y_start=HT_Y_START, md=None, offset=3.5, run=True,
              det=tcm1):
     """Align high-throughput sample holder.
 
@@ -67,14 +67,14 @@ def align_ht(x_start=HT_X_START, y_start=HT_Y_START, md=None, offset=3, run=True
 
             # Find uid and peak stats for horizontal calibration:
             uid, PS_X = yield from _align_ht('horizontal', ht.x,
-                                             x_start-offset, x_start+offset, 121,
+                                             x_start-offset, x_start+offset, 141,
                                              md=md, det=det, ax=ax_hor)
 
             # Move hor. position to COM before we scan vertical one:
             yield from bps.mv(ht.x, PS_X.com, ht.y, y_start-offset)
 
             uid, PS_Y = yield from _align_ht('vertical', ht.y,
-                                             y_start-offset, y_start+offset, 121,
+                                             y_start-offset, y_start+offset, 141,
                                              md=md, det=det, ax=ax_ver)
             # Move both hor. & vert. positions to COM after alignment:
             yield from bps.mv(ht.x, PS_X.com, ht.y, PS_Y.com)
