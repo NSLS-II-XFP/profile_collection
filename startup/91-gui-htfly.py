@@ -2,8 +2,8 @@ import copy
 from enum import Enum
 
 import pandas as pd
+from matplotlib.backends.qt_compat import QtCore, QtGui, QtWidgets
 from ophyd import EpicsSignalRO
-from qtpy import QtCore, QtGui, QtWidgets
 
 
 class TestMode:
